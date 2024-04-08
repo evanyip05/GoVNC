@@ -1,4 +1,4 @@
-package Views
+package RTC
 
 import (
 	"bytes"
@@ -14,20 +14,17 @@ import (
 	"github.com/pion/webrtc/v3"
 )
 
-type wrtcClient struct {
+type RTCClient struct {
 	SSEUnregisterURL string
 	SSERegisterURL   string
 	SSEListenURL     string
 	SSECallURL       string
-
-	onConnect func(*wrtcClient)
 
 	channels map[string]*webrtc.DataChannel
 	Conn     *webrtc.PeerConnection
 	ice      []webrtc.ICECandidate
 	id       string
 }
-
 type Request struct {
 	Action        string                    `json:"action"`
 	CallerID      string                    `json:"callerID"`
@@ -42,62 +39,52 @@ type Response struct {
 	IceCandidates []webrtc.ICECandidate     `json:"iceCandidates"`
 }
 
-func NewClient(SSEHost string, iceURLS ...string) (wrtcClient, error) {
-	api := webrtc.NewAPI()
+func NewClient(SSEHost string, iceURLS ...string) (RTCClient, error) {
+	this := RTCClient{}
 
-	peerConnection, err := api.NewPeerConnection(webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{
-			{URLs: iceURLS},
-		},
+	this.SSERegisterURL  = "http://" + SSEHost + "/register"
+	this.SSEUnregisterURL= "http://" + SSEHost + "/unregister"
+	this.SSEListenURL    = "http://" + SSEHost + "/listen"
+	this.SSECallURL      = "http://" + SSEHost + "/call"
+
+	peerConnection, err := webrtc.NewAPI().NewPeerConnection(webrtc.Configuration{
+		ICEServers: []webrtc.ICEServer{{URLs: iceURLS}},
 	})
+	this.Conn = peerConnection
+	if err != nil {return RTCClient{}, err}
+	
+	this.channels = make(map[string]*webrtc.DataChannel)
+	this.ice = []webrtc.ICECandidate{}
+	this.id = ""
 
-	if err != nil {
-		return wrtcClient{}, err
-	}
-
-	return wrtcClient{
-		SSERegisterURL:   "http://" + SSEHost + "/register",
-		SSEUnregisterURL: "http://" + SSEHost + "/unregister",
-		SSEListenURL:     "http://" + SSEHost + "/listen",
-		SSECallURL:       "http://" + SSEHost + "/call",
-
-		channels: make(map[string]*webrtc.DataChannel),
-		Conn:     peerConnection,
-		ice:      []webrtc.ICECandidate{},
-		id:       "",
-	}, nil
-}
-
-func (c *wrtcClient) Init() error {
 	// ice listeners
-	c.Conn.OnICECandidate(func(i *webrtc.ICECandidate) {
+	this.Conn.OnICECandidate(func(i *webrtc.ICECandidate) {
 		if i != nil {
-			c.ice = append(c.ice, *i)
+			this.ice = append(this.ice, *i)
 		}
 	})
 
+	// would have ondatachannel event, but unnessecary cause handler doesnt get overwritten
+
+	this.SendDataChannel("init") // doesnt get connected, establish ice-username fragment
+
 	// sse register
-	resp, err := http.Get(c.SSERegisterURL + "?id=BB")
-	if err != nil {
-		return err
-	}
+	resp, err := http.Get(this.SSERegisterURL + "?id=BB")
+	if err != nil {return RTCClient{}, err}
 	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-	c.id = string(data)
+	if err != nil {return RTCClient{}, err}
+	this.id = string(data)
 
-	println("YOUR ID:", c.id)
+	println("YOUR ID:", this.id)
 
-	// sse subscribe
-	go c.signalingListen()
+	go this.signalingListen()
 
-	go c.waitUnregister()
+	go this.waitUnregister()
 
-	return nil
+	return this, nil
 }
 
-func (c *wrtcClient) waitUnregister() {
+func (c *RTCClient) waitUnregister() {
 	// Create a channel to receive OS signals
 	signalChannel := make(chan os.Signal, 1)
 
@@ -114,7 +101,7 @@ func (c *wrtcClient) waitUnregister() {
 	os.Exit(0)
 }
 
-func (c *wrtcClient) signalingListen() {
+func (c *RTCClient) signalingListen() {
 	println("listening?????")
 	client := http.Client{}
 
@@ -184,7 +171,11 @@ func (c *wrtcClient) signalingListen() {
 	}
 }
 
-func (c *wrtcClient) sendRequest(calleeID string) {
+func (c *RTCClient) Connect(calleeID string) {
+	c.sendRequest(calleeID)
+}
+
+func (c *RTCClient) sendRequest(calleeID string) {
 	println("creating offer...")
 
 	// create local offer
@@ -218,7 +209,7 @@ func (c *wrtcClient) sendRequest(calleeID string) {
 }
 
 // receive offer, create answer, and send it
-func (c *wrtcClient) receiveRequestSendResponse(data Request) {
+func (c *RTCClient) receiveRequestSendResponse(data Request) {
 	println("creating answer...")
 
 	// take remote offer
@@ -264,7 +255,7 @@ func (c *wrtcClient) receiveRequestSendResponse(data Request) {
 }
 
 // receive response, try connect, if fail, run send request
-func (c *wrtcClient) receiveResponse(data Response) {
+func (c *RTCClient) receiveResponse(data Response) {
 	println("receiving answer...")
 
 	// take remote answer
@@ -293,16 +284,10 @@ func (c *wrtcClient) receiveResponse(data Response) {
 	if c.Conn.ICEConnectionState().String() != "connected" {
 		println("retrying...")
 		c.sendRequest(data.CalleeID)
-	} else {
-		c.onConnect(c)
 	}
 }
 
-func (c *wrtcClient) SetOnConnect(callback func(*wrtcClient)) {
-	c.onConnect = callback
-}
-
-func (c *wrtcClient) FindDataChannel(name string) *webrtc.DataChannel {
+func (c *RTCClient) FindDataChannel(name string) *webrtc.DataChannel {
 	finder := make(chan *webrtc.DataChannel)
 
 	c.Conn.OnDataChannel(func(dc *webrtc.DataChannel) {
@@ -314,77 +299,6 @@ func (c *wrtcClient) FindDataChannel(name string) *webrtc.DataChannel {
 	return <-finder
 }
 
-func (c *wrtcClient) SendDataChannel(name string) (*webrtc.DataChannel, error) {
+func (c *RTCClient) SendDataChannel(name string) (*webrtc.DataChannel, error) {
 	return c.Conn.CreateDataChannel(name, &webrtc.DataChannelInit{})
 }
-
-// func (c *wrtcClient) OpenReadChannel(name string) (chan string, error) {
-// 	dataChan := c.channels[name]
-// 	if (dataChan == nil) {
-// 		dc, err := c.Conn.CreateDataChannel(name, &webrtc.DataChannelInit{})
-// 		if err != nil {return nil, err}
-// 		dataChan = dc
-// 	}
-
-// 	read := make(chan string)
-
-// 	dataChan.OnMessage(func(msg webrtc.DataChannelMessage) {
-// 		println("INCOMING MSG")
-// 		read <- string(msg.Data)
-// 	})
-
-// 	return read, nil
-// 	// read := make(chan string)
-
-// 	// c.Conn.OnDataChannel(func(dc *webrtc.DataChannel) {
-// 	// 	println(dc.Label())
-// 	// 	if dc.Label() == name {
-// 	// 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-// 	// 			read <- string(msg.Data)
-// 	// 		})
-// 	// 	}
-// 	// })
-
-// 	// return read
-// }
-
-// func (c *wrtcClient) OpenWriteChannel(name string) (chan string, *bool, error) {
-// 	open := make(chan bool)
-// 	openState := false
-// 	write := make(chan string)
-
-// 	dataChan := c.channels[name]
-// 	if (dataChan == nil) {
-// 		dc, err := c.Conn.CreateDataChannel(name, &webrtc.DataChannelInit{})
-// 		if err != nil {return nil, nil, err}
-// 		dataChan = dc
-// 	}
-
-// 	dataChan.OnOpen(func() {
-// 		open <- true
-// 		println("OPEN", name)
-// 	})
-
-// 	go func() {
-// 		openState = <-open
-// 		println("OPEN", name)
-// 		for {
-// 			data := <-write
-// 			//println("sending text:",data)
-// 			dataChan.SendText(data)
-// 		}
-// 	}()
-
-// 	return write, &openState, nil
-// }
-
-// func (c *wrtcClient) OpenReadWriteChannel(name string) (chan string, chan string, *bool, error) {
-// 	read := c.OpenReadChannel(name)
-// 	write, writeOpen, err := c.OpenWriteChannel(name)
-
-// 	if err != nil {
-// 		return nil, nil, nil, err
-// 	}
-
-// 	return read, write, writeOpen, nil
-// }

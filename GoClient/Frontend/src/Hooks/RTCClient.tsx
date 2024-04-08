@@ -22,7 +22,6 @@ export class RTCClient {
     ice: RTCIceCandidate[];
     id: string;
     channelFinders:  Map<string, any>;
-    trackFinders:  Map<string, any>;
 
     constructor(SSEHost:string , ...servers: string[]) {
         this.SSERegisterURL  = "http://" + SSEHost + "/register"
@@ -31,11 +30,10 @@ export class RTCClient {
         this.SSECallURL      = "http://" + SSEHost + "/call"
 
         this.Conn = new RTCPeerConnection({
-            iceServers: [{urls: servers}],
-            
+            iceServers: [{urls: servers}],  
         })
+
         this.channelFinders = new Map()
-        this.trackFinders = new Map()
         this.ice = []
         this.id = ""
 
@@ -51,13 +49,7 @@ export class RTCClient {
             })
         }
 
-        this.Conn.ontrack = event => {
-            this.trackFinders.forEach((v, k) => {
-                v(event)
-            })
-        }
-
-       // this.SendDataChannel("init") // doesnt get connected, establish ice-username fragment
+        this.SendDataChannel("init") // doesnt get connected, establish ice-username fragment
 
         fetch(this.SSERegisterURL+"?id=AA").then(res => {
             res.text().then(text => {
@@ -68,8 +60,6 @@ export class RTCClient {
                 this.signalingListen()
                 
                 this.waitUnregister()
-
-                //this.sendRequest("BB")
             })
         })  
     }
@@ -167,22 +157,6 @@ export class RTCClient {
             }
         }, 500)
     }
-
-    FindTrack(name:string): Promise<MediaStreamTrack> {
-        console.log("FINDING TRACK",name)
-
-        return new Promise((res) => {
-            if (!this.trackFinders.has(name)) { // basically dont set the ondatachannel to a whole diff channel, loosing the finding ability of another
-                this.trackFinders.set(name, (event:RTCTrackEvent) => {
-                    if (event.track.label == name) {
-                        res(event.track)
-                        this.trackFinders.delete(name)
-                    }
-                })
-            }
-        })
-    }
-
     
     FindDataChannel(name:string): Promise<RTCDataChannel> {
         console.log("FINDING CHANNEL",name)

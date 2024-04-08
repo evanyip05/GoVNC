@@ -1,4 +1,4 @@
-package RTCServer
+package main
 
 import "RTCServer/Server"
 
